@@ -30,12 +30,11 @@ fn check_installed(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
+fn build_from_source(out_dir: &Path) -> anyhow::Result<PathBuf> {
     // Check if autoconf is installed
     check_installed("autoconf")?;
     check_installed("automake")?;
 
-    let out_dir = env::var("OUT_DIR").map(PathBuf::from)?;
     let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("jq");
     let build_dir = out_dir.join("jq_build");
 
@@ -90,8 +89,36 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-link-lib=static={}", lib);
     }
 
+    Ok(include_dir)
+}
+
+fn probe_includedir(out_dir: &Path) -> anyhow::Result<PathBuf> {
+    println!("cargo:rerun-if-env-changed=LIBJQ_NO_VENDOR");
+    let force_no_vendor = env::var("LIBJQ_NO_VENDOR").map_or(false, |v| v != "0");
+
+    match pkg_config::probe_library("libjq") {
+        Ok(lib) => lib
+            .include_paths
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Failed to resolve libjq include path")),
+        _ => {
+            if force_no_vendor {
+                anyhow::bail!("LIBJQ_NO_VENDOR is set but a suitable system-provided libjq could not be found");
+            }
+
+            build_from_source(out_dir)
+        }
+    }
+}
+
+fn main() -> anyhow::Result<()> {
+    let out_dir = env::var("OUT_DIR").map(PathBuf::from)?;
+    let includedir = probe_includedir(&out_dir)?;
+
     let bindings = bindgen::Builder::default()
-        .header("jq/src/jq.h")
+        .clang_arg(format!("-I{}", includedir.display()))
+        .header("src/wrapper.h")
         .generate()?;
 
     bindings.write_to_file(out_dir.join("bindings.rs"))?;
